@@ -293,7 +293,7 @@ class MainActivity : Activity() {
         artwork: Int = 0,
         tint: Int = accent,
         action: () -> Unit
-    ): View {
+    ): LinearLayout {
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             isFocusable = true
