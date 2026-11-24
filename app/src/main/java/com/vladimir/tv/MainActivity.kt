@@ -19,6 +19,7 @@ import java.util.Locale
 import android.content.res.Configuration
 import android.widget.*
 import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.bumptech.glide.Glide
@@ -174,7 +175,11 @@ class MainActivity : Activity() {
             if (lists.isEmpty()) -1 else 0
         )
 
-        player = ExoPlayer.Builder(this).build()
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(45_000, 75_000, 5_000, 8_000)
+            .setTargetBufferBytes(48 * 1024 * 1024)
+            .build()
+        player = ExoPlayer.Builder(this).setLoadControl(loadControl).build()
         player?.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 val entry = currentEntry ?: return
@@ -200,7 +205,6 @@ class MainActivity : Activity() {
             loadPlaylist(activeList)
         }
         loadVodPlaylist()
-        loadEpg()
         if (prefs.getString("xtream_server", "").orEmpty().isNotBlank()) loadXtream()
     }
 
@@ -346,7 +350,7 @@ class MainActivity : Activity() {
         }
 
         header.addView(
-            label("VladiMir TV 6.0", 26f, true),
+            label("VladiMir TV 6.0.3", 26f, true),
             LinearLayout.LayoutParams(0, -2, 1f)
         )
 
@@ -646,7 +650,7 @@ class MainActivity : Activity() {
             return
         }
         if (entry.portalCollection) {
-            showPortalPage(portal, operation, entry.title, back)
+            showPortalPage(portal, operation, entry.title, back = back)
             return
         }
         val ticket = ++portalGeneration
@@ -849,7 +853,7 @@ class MainActivity : Activity() {
                 return
             }
             val channelList = type == "tv" || type == "favorites"
-            val mode = if (channelList) prefs.getInt("channel_layout", 0) else 0
+            val mode = if (channelList) prefs.getInt("channel_layout", 3) else 0
             val showProgramme = type == "guide" || prefs.getBoolean("channel_show_programme", true)
             if (channelList && mode in 3..4) {
                 val logosOnly = mode == 4
@@ -859,48 +863,26 @@ class MainActivity : Activity() {
                     entries.forEach { entry ->
                         val logo = channelLogo(entry)
                         val validLogo = logo.isNotBlank()
-                        val card = LinearLayout(this).apply {
-                            orientation = LinearLayout.VERTICAL
-                            gravity = Gravity.CENTER
-                            isFocusable = true
-                            isClickable = true
-                            contentDescription = entry.title
-                            background = background(panel)
-                            setOnFocusChangeListener { view, focused ->
-                                view.background = background(if (focused) accent else panel)
-                            }
-                            setOnClickListener { play(entry) }
-                            setOnLongClickListener {
-                                toggleFav(entry)
-                                toast(if (prefs.getStringSet("favorites", emptySet()).orEmpty().contains(entry.url))
-                                    tr("Добавлено в избранное", "Zu Favoriten hinzugefügt", "Added to favorites")
-                                else tr("Убрано из избранного", "Aus Favoriten entfernt", "Removed from favorites"))
-                                if (type == "favorites") showCatalog(type, selectedGroup)
-                                true
-                            }
+                        val card = channelCard(entry.title, vertical = true) { play(entry) }
+                        card.setOnLongClickListener {
+                            toggleFav(entry)
+                            toast(if (prefs.getStringSet("favorites", emptySet()).orEmpty().contains(entry.url))
+                                tr("Добавлено в избранное", "Zu Favoriten hinzugefügt", "Added to favorites")
+                            else tr("Убрано из избранного", "Aus Favoriten entfernt", "Removed from favorites"))
+                            if (type == "favorites") showCatalog(type, selectedGroup)
+                            true
                         }
                         if (validLogo) card.addView(
-                            artwork(logo, 120, if (logosOnly) 100 else 68),
-                            LinearLayout.LayoutParams(-1, dp(if (logosOnly) 100 else 68))
+                            channelArtwork(logo, 136, 98),
+                            LinearLayout.LayoutParams(-1, dp(98))
                         )
                         if (!logosOnly || !validLogo) {
-                            card.addView(label(entry.title, 11f, true).apply {
-                                gravity = Gravity.CENTER
-                                maxLines = 1
-                                ellipsize = android.text.TextUtils.TruncateAt.END
-                            })
+                            card.addView(channelText(entry.title, 15f, true, centered = true))
                         }
                         if (!logosOnly && showProgramme) {
-                            val programme = guideEntries(entry).firstOrNull { now in it.start until it.stop }
-                            programme?.title?.takeIf { it.isNotBlank() }?.let { title ->
-                                card.addView(label(title, 13f).apply {
-                                    gravity = Gravity.CENTER
-                                    maxLines = 1
-                                    ellipsize = android.text.TextUtils.TruncateAt.END
-                                })
-                            }
+                            card.addView(channelText(programmeLine(entry, now), 11f, false, centered = true))
                         }
-                        gridRow.addView(card, LinearLayout.LayoutParams(0, dp(if (logosOnly) 132 else 126), 1f).apply {
+                        gridRow.addView(card, LinearLayout.LayoutParams(0, dp(if (logosOnly) 116 else 146), 1f).apply {
                             setMargins(dp(4), dp(4), dp(4), dp(4))
                         })
                     }
@@ -916,60 +898,37 @@ class MainActivity : Activity() {
             }
 
             visible.forEach { entry ->
-                    val row = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                    }
-
-                    row.gravity = Gravity.CENTER_VERTICAL
-                    if (prefs.getBoolean("show_artwork", true)) {
-                        val logoWidth = when (mode) { 1 -> 144; 2 -> 52; else -> if (type == "movies") 116 else 108 }
-                        val logoHeight = when (mode) { 1 -> 96; 2 -> 42; else -> if (type == "movies") 166 else 72 }
-                        row.addView(artwork(channelLogo(entry), logoWidth, logoHeight))
-                    }
-                    val isMovie = entry.type == "movies"
-                    val guide = if (isMovie || !showProgramme) "" else guideEntries(entry)
-                        .firstOrNull { now in it.start until it.stop }?.title.orEmpty()
-                    val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                    val title = if (isMovie || !showProgramme) entry.title else guide.ifBlank {
-                        tr("Нет данных о передаче", "Keine Sendungsdaten", "No programme data")
-                    }
-                    details.addView(button(if (isMovie) "▶ $title" else title) {
-                        if (type == "guide") showGuideDialog(entry) else play(entry)
-                    }.apply {
-                        if (isMovie) {
-                            textSize = 14f
-                            maxLines = 2
-                            ellipsize = android.text.TextUtils.TruncateAt.END
-                            gravity = Gravity.CENTER_VERTICAL or Gravity.START
-                        } else {
-                            textSize = 13f
-                            maxLines = 1
-                            ellipsize = android.text.TextUtils.TruncateAt.END
-                            contentDescription = if (guide.isBlank()) entry.title else "${entry.title}: $guide"
-                        }
-                    })
-                    if (isMovie) {
-                        val description = entry.description.ifBlank {
-                            tr("Описание недоступно", "Keine Beschreibung verfügbar", "Description unavailable")
-                        }
-                        details.addView(videoInfoButton(entry.title, description) { play(entry) },
-                            LinearLayout.LayoutParams(-2, -2))
-                        details.addView(watchLaterButton(entry), LinearLayout.LayoutParams(-2, -2))
-                    }
-                    row.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
-
-                    row.addView(
-                        button(
-                            if (favorites.contains(entry.url))
-                                "★" else "☆"
-                        ) {
-                            toggleFav(entry)
-                            showCatalog(type, selectedGroup)
-                        }
-                    )
-
-                    list.addView(row)
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
                 }
+                val card = channelCard(entry.title, vertical = false) {
+                    if (type == "guide") showGuideDialog(entry) else play(entry)
+                }
+                if (prefs.getBoolean("show_artwork", true)) {
+                    val width = when (mode) { 1 -> 172; 2 -> 72; else -> 144 }
+                    val height = when (mode) { 1 -> 106; 2 -> 48; else -> 88 }
+                    card.addView(channelArtwork(channelLogo(entry), width, height))
+                }
+                val details = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(12), dp(4), dp(4), dp(4))
+                }
+                details.addView(channelText(entry.title, 18f, true))
+                if (showProgramme) details.addView(channelText(programmeLine(entry, now), 12f, false))
+                card.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
+                row.addView(card, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                    setMargins(0, dp(3), dp(8), dp(3))
+                })
+                val star = button(if (favorites.contains(entry.url)) "★" else "☆") {}
+                star.setOnClickListener {
+                    toggleFav(entry)
+                    if (type == "favorites") showCatalog(type, selectedGroup)
+                    else star.text = if (prefs.getStringSet("favorites", emptySet()).orEmpty().contains(entry.url)) "★" else "☆"
+                }
+                row.addView(star)
+                list.addView(row)
+            }
             nextPage()
         }
 
@@ -1002,14 +961,37 @@ class MainActivity : Activity() {
             Regex("""(?i)\bS\d{1,3}E\d{1,4}\b""").containsMatchIn(entry.title)
     }
 
-    private fun videoInfoButton(title: String, description: String, playVideo: () -> Unit): Button =
-        button(tr("О фильме", "Details", "Details")) {
-            AlertDialog.Builder(this).setTitle(title)
-                .setMessage(description)
-                .setPositiveButton(tr("Смотреть", "Ansehen", "Play")) { _, _ -> playVideo() }
-                .setNegativeButton(tr("Закрыть", "Schließen", "Close"), null)
-                .show()
-        }.apply { textSize = 12f }
+    private fun channelCard(title: String, vertical: Boolean, action: () -> Unit): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = if (vertical) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            gravity = if (vertical) Gravity.CENTER else Gravity.CENTER_VERTICAL
+            isFocusable = true
+            isClickable = true
+            contentDescription = title
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = background(panel)
+            setOnFocusChangeListener { view, focused ->
+                view.background = background(if (focused) Color.rgb(18, 91, 180) else panel)
+            }
+            setOnClickListener { action() }
+        }
+
+    private fun channelArtwork(url: String, width: Int, height: Int): ImageView =
+        artwork(url, width, height).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+
+    private fun channelText(value: String, size: Float, bold: Boolean, centered: Boolean = false): TextView =
+        label(value, size, bold).apply {
+            if (centered) gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+
+    private fun programmeLine(entry: Entry, now: Long): String =
+        guideEntries(entry).firstOrNull { now in it.start until it.stop }?.title
+            ?: tr("Нет данных о передаче", "Keine Sendungsdaten", "No programme data")
 
     private fun toggleFav(entry: Entry) {
         val set = (
@@ -1194,14 +1176,12 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     if (index == activeList && lists.getOrNull(index)?.second == url) {
-                        if (playlistGuideUrls != guides) {
-                            playlistGuideUrls = guides
-                            loadEpg()
-                        }
+                        playlistGuideUrls = guides
                         val merged = items.filter { it.url.contains("/live/") }.associateByTo(linkedMapOf()) { it.url }
                         parsed.forEach { merged[it.url] = it }
                         items.clear()
                         items.addAll(merged.values)
+                        loadEpg()
                         toast("${parsed.size} items")
                         if (current == "home") showHome()
                     }
@@ -1752,12 +1732,83 @@ class MainActivity : Activity() {
     }
 
     private fun openVideoPortal() {
-        val portal = parseVideoPortal(prefs.getString("video_portal_link", "").orEmpty())
+        val configuredLink = prefs.getString("video_portal_link", "").orEmpty()
+        if (configuredLink != arrivalsProvider) {
+            portalSeenPages.clear()
+            portalNewEntries.clear()
+            arrivalsProvider = configuredLink
+        }
+        val portal = parseVideoPortal(configuredLink)
         if (portal == null) editVideoPortal()
         else showPortalPage(portal, JSONObject(), "VPortal") { showCatalog("movies") }
     }
 
-    private fun showPortalPage(portal: VideoPortal, request: JSONObject, heading: String, back: () -> Unit) {
+    private var arrivalsProvider = ""
+    private val portalSeenPages = mutableMapOf<String, Set<String>>()
+    private val portalNewEntries = linkedMapOf<String, Entry>()
+
+    private fun newArrivalsTitle() =
+        tr("Новые поступления", "Neu hinzugefügt", "New arrivals")
+
+    private fun isNewArrivalsCategory(title: String): Boolean {
+        val name = title.lowercase(Locale.ROOT)
+        return listOf("новые поступления", "новинки", "недавно добавлен", "neu hinzugefügt",
+            "recently added", "new arrivals").any { name.contains(it) }
+    }
+
+    private fun showPortalArrivals(back: () -> Unit) {
+        scaffold("vportal")
+        portalBack = back
+        portalGeneration++
+        sectionTitle(newArrivalsTitle())
+        if (portalNewEntries.isEmpty()) content.addView(label(tr(
+            "После обновления открытых разделов здесь появятся новые позиции.",
+            "Neue Titel erscheinen hier nach dem erneuten Laden besuchter Bereiche.",
+            "New titles appear here after previously opened sections are reloaded.")))
+        val posters = PosterGrid(content)
+        portalNewEntries.values.toList().asReversed().forEach { entry ->
+            posters.add(entry) {
+                showPosterDetails(entry) { openSavedVideo(entry) { showPortalArrivals(back) } }
+            }
+        }
+    }
+
+    private inner class PortalCategoryGrid(private val target: LinearLayout) {
+        private val columns = if (isPhone()) 2 else 5
+        private var row: LinearLayout? = null
+        private var count = 0
+
+        fun breakRow() {
+            row = null
+            count = 0
+        }
+
+        fun add(title: String, icon: Int, tint: Int, action: () -> Unit) {
+            val line = row ?: LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                target.addView(this, LinearLayout.LayoutParams(-1, -2))
+                row = this
+            }
+            val size = ((resources.displayMetrics.widthPixels - dp(32)) / columns - dp(12))
+                .coerceIn(dp(76), dp(140))
+            val card = tile(title, "", icon, tint, action).apply {
+                gravity = Gravity.CENTER
+                getChildAt(childCount - 1).visibility = View.GONE
+                (getChildAt(1) as TextView).apply {
+                    textSize = 15f
+                    maxLines = 2
+                    gravity = Gravity.CENTER
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }
+            }
+            line.addView(card, LinearLayout.LayoutParams(size, size).apply {
+                setMargins(dp(4), dp(4), dp(4), dp(8))
+            })
+            if (++count == columns) breakRow()
+        }
+    }
+
+    private fun showPortalPage(portal: VideoPortal, request: JSONObject, heading: String, page: Int = 0, back: () -> Unit) {
         scaffold("vportal")
         portalBack = back
         val generation = ++portalGeneration
@@ -1782,19 +1833,46 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 status.visibility = View.GONE
-                val reload = { showPortalPage(portal, request, heading, back) }
+                val reload = { showPortalPage(portal, request, heading, page, back) }
                 val posters = PosterGrid(content)
-                for (index in 0 until rows.length().coerceAtMost(1000)) {
+                val categories = PortalCategoryGrid(content)
+                val pageEntries = linkedMapOf<String, Entry>()
+                val rootPage = request.length() == 0 && page == 0
+                val providerArrivals = (0 until rows.length()).asSequence()
+                    .mapNotNull { rows.optJSONObject(it) }
+                    .firstOrNull { it.optString("type") == "category" &&
+                        isNewArrivalsCategory(it.optString("title")) }
+                    ?.optJSONObject("request")
+                if (rootPage) categories.add(newArrivalsTitle(), android.R.drawable.ic_menu_recent_history,
+                    Color.rgb(255, 199, 114)) {
+                    if (providerArrivals != null) showPortalPage(portal, providerArrivals, newArrivalsTitle(), back = reload)
+                    else showPortalArrivals(reload)
+                }
+                val pageSize = 40
+                if (page > 0) content.addView(button(tr("Предыдущая страница", "Vorherige Seite", "Previous page")) {
+                    showPortalPage(portal, request, heading, page - 1, back)
+                })
+                val firstRow = page * pageSize
+                val endRow = (firstRow + pageSize).coerceAtMost(rows.length())
+                for (index in firstRow until endRow) {
                     val row = rows.optJSONObject(index) ?: continue
                     val name = row.optString("title").ifBlank { "VPortal" }
                     val operation = row.optJSONObject("request")
                     val type = row.optString("type")
-                    if (type in setOf("category", "next") && operation != null) {
+                    if (type == "category" && operation != null) {
+                        if (rootPage && isNewArrivalsCategory(name)) continue
                         posters.breakRow()
-                        content.addView(button(name) {
-                            showPortalPage(portal, operation, if (type == "next") heading else name, reload)
-                        })
+                        val nameKey = name.lowercase(Locale.ROOT)
+                        val series = listOf("сериал", "series", "serien", "телепередач").any { nameKey.contains(it) }
+                        val icon = if (series) R.drawable.ic_live_television else R.drawable.ic_cinema
+                        val tint = if (series) Color.rgb(104, 198, 255) else Color.rgb(217, 155, 251)
+                        categories.add(name, icon, tint) { showPortalPage(portal, operation, name, back = reload) }
+                    } else if (type == "next" && operation != null) {
+                        posters.breakRow()
+                        categories.breakRow()
+                        content.addView(button(name) { showPortalPage(portal, operation, heading, back = reload) })
                     } else if (type == "stream" || type == "multistream") {
+                        categories.breakRow()
                         val poster = sequenceOf("imglr", "img", "poster", "cover")
                             .mapNotNull { key -> row.optString(key).takeUnless { it == "null" } }
                             .mapNotNull { webUrl(portal.endpoint.toString(), it) }.firstOrNull().orEmpty()
@@ -1807,11 +1885,26 @@ class MainActivity : Activity() {
                             description = description, portalRequest = if (direct == null) operation?.toString().orEmpty() else "",
                             portalCollection = collection, videoMetadata = metadata)
                         val canPlay = direct != null || operation != null
+                        if (canPlay) pageEntries[videoKey(entry)] = entry
                         posters.add(entry) {
                             showPosterDetails(entry, canPlay) { openSavedVideo(entry, reload) }
                         }
                     }
                 }
+                if (pageEntries.isNotEmpty()) {
+                    val pageKey = portal.endpoint.toString() + request.toString() + "#" + page
+                    val previous = portalSeenPages.put(pageKey, pageEntries.keys.toSet())
+                    if (previous != null) {
+                        pageEntries.forEach { (key, entry) ->
+                            if (key !in previous) portalNewEntries[key] = entry
+                        }
+                        while (portalNewEntries.size > 100) portalNewEntries.remove(portalNewEntries.keys.first())
+                    }
+                }
+                if (endRow < rows.length()) content.addView(button(tr(
+                    "Следующая страница", "Nächste Seite", "Next page")) {
+                    showPortalPage(portal, request, heading, page + 1, back)
+                })
                 if (content.childCount <= 2) {
                     status.visibility = View.VISIBLE
                     status.text = tr("Каталог пуст", "Katalog ist leer", "The catalog is empty")
@@ -1909,7 +2002,7 @@ class MainActivity : Activity() {
                 )
                 AlertDialog.Builder(this)
                     .setTitle(tr("Вид каналов", "Senderansicht", "Channel view"))
-                    .setSingleChoiceItems(labels, prefs.getInt("channel_layout", 0)) { dialog, index ->
+                    .setSingleChoiceItems(labels, prefs.getInt("channel_layout", 3)) { dialog, index ->
                         prefs.edit().putInt("channel_layout", index).apply()
                         dialog.dismiss()
                         toast(tr("Вид сохранён", "Ansicht gespeichert", "Layout saved"))
@@ -2099,6 +2192,7 @@ class MainActivity : Activity() {
                     items.removeAll { it.url.startsWith("$server/live/") }
                     vodItems.removeAll { it.url.startsWith("$server/movie/") }
                     items.addAll(live); vodItems.addAll(films)
+                    loadEpg()
                     toast("Xtream: ${live.size} TV / ${films.size} VOD")
                     if (current == "home") showHome()
                 }
@@ -2139,6 +2233,14 @@ class MainActivity : Activity() {
     }
 
     private fun loadEpg() {
+        val channels = items.filter { it.type == "tv" }
+        if (channels.isEmpty()) {
+            lastEpgRequestAt = android.os.SystemClock.elapsedRealtime()
+            return
+        }
+        val wanted = channels.flatMap { listOf(it.epgId, it.title) }
+            .flatMap { listOf(normalizedGuideName(it), normalizedGuideName(it.trim().replace(qualitySuffix, ""))) }
+            .filter(String::isNotEmpty).toHashSet()
         lastEpgRequestAt = android.os.SystemClock.elapsedRealtime()
         val generation = ++epgLoadGeneration
         val manual = prefs.getString("epg_url", "").orEmpty().trim()
@@ -2149,7 +2251,7 @@ class MainActivity : Activity() {
             "$server/xmltv.php?username=${URLEncoder.encode(user, "UTF-8")}&password=${URLEncoder.encode(pass, "UTF-8")}"
         } else ""
         val addresses = (listOf(manual, provider) + playlistGuideUrls.take(4) + listOf(
-            "https://epg.admuspeh.my/epg.xml.gz",
+            "https://epg.uspeh.my/epg.xml.gz",
             "https://free-epg.de/api/epg/de.xml.gz",
             "https://free-epg.de/api/epg/ru.xml.gz"
         )).filter { it.startsWith("http://") || it.startsWith("https://") }.distinct()
@@ -2158,40 +2260,51 @@ class MainActivity : Activity() {
             val schedule = mutableMapOf<String, MutableList<Programme>>()
             val names = mutableMapOf<String, MutableSet<String>>()
             val icons = mutableMapOf<String, String>()
-            addresses.forEach { address ->
-                val feed = runCatching { readGuide(address, now) }.getOrNull()
+            fun publish(finished: Boolean) {
+                val aliases = mutableMapOf<String, MutableSet<String>>()
+                (schedule.keys + icons.keys).forEach { id ->
+                    (names[id].orEmpty() + id).forEach { name ->
+                        listOf(name, name.trim().replace(qualitySuffix, "")).forEach { candidate ->
+                            val key = normalizedGuideName(candidate)
+                            if (key.isNotEmpty()) aliases.getOrPut(key) { mutableSetOf() }.add(id)
+                        }
+                    }
+                }
+                val uniqueAliases = aliases.mapNotNull { (key, ids) ->
+                    ids.singleOrNull()?.let { key to it }
+                }.toMap()
+                val sorted = schedule.mapValues { (_, entries) ->
+                    entries.distinctBy { it.start }.sortedBy { it.start }.toMutableList()
+                }
+                val iconSnapshot = icons.toMap()
+                runOnUiThread {
+                    if (generation != epgLoadGeneration || isDestroyed) return@runOnUiThread
+                    if (sorted.isNotEmpty() || iconSnapshot.isNotEmpty()) {
+                        epgSchedule.clear()
+                        epgSchedule.putAll(sorted)
+                        epgAliases = uniqueAliases
+                        epgIcons = iconSnapshot
+                        if (current in setOf("tv", "favorites", "guide") && sidePanel == null) showCatalog(current, catalogGroup)
+                    }
+                    if (finished) {
+                        val matched = channels.count { guideEntries(it).isNotEmpty() }
+                        toast(tr("Телегид", "TV-Programm", "TV guide") + ": $matched / ${channels.size}")
+                    }
+                }
+            }
+            addresses.forEachIndexed { index, address ->
+                val feed = runCatching { readGuide(address, now, wanted) }.getOrNull()
                 if (feed != null) {
                     feed.programmes.forEach { (id, entries) -> schedule.getOrPut(id) { mutableListOf() }.addAll(entries) }
                     feed.names.forEach { (id, aliases) -> names.getOrPut(id) { mutableSetOf() }.addAll(aliases) }
                     feed.icons.forEach { (id, icon) -> icons.putIfAbsent(id, icon) }
                 }
-            }
-            val aliases = mutableMapOf<String, MutableSet<String>>()
-            (schedule.keys + icons.keys).forEach { id ->
-                (names[id].orEmpty() + id).forEach { name ->
-                    val key = normalizedGuideName(name)
-                    if (key.isNotEmpty()) aliases.getOrPut(key) { mutableSetOf() }.add(id)
-                }
-            }
-            val uniqueAliases = aliases.mapNotNull { (key, ids) -> ids.singleOrNull()?.let { key to it } }.toMap()
-            val sorted = schedule.mapValues { (_, entries) ->
-                entries.distinctBy { it.start }.sortedBy { it.start }.toMutableList()
-            }
-            runOnUiThread {
-                if (generation != epgLoadGeneration || isDestroyed) return@runOnUiThread
-                if (sorted.isNotEmpty() || icons.isNotEmpty()) {
-                    epgSchedule.clear()
-                    epgSchedule.putAll(sorted)
-                    epgAliases = uniqueAliases
-                    epgIcons = icons
-                    if (current in setOf("tv", "favorites", "guide")) showCatalog(current, catalogGroup)
-                }
-                if (sorted.isEmpty()) toast(tr("EPG: нет данных", "EPG: keine Daten", "EPG: no data"))
+                if (feed != null || index == addresses.lastIndex) publish(index == addresses.lastIndex)
             }
         }
     }
 
-    private fun readGuide(address: String, now: Long): GuideFeed {
+    private fun readGuide(address: String, now: Long, wanted: Set<String>): GuideFeed {
         val connection = URL(address).openConnection() as HttpURLConnection
         connection.connectTimeout = 12000
         connection.readTimeout = 30000
@@ -2216,6 +2329,12 @@ class MainActivity : Activity() {
                     val xml = android.util.Xml.newPullParser()
                     xml.setFeature("http://xmlpull.org/v1/doc/features.html#process-docdecl", false)
                     xml.setInput(input, null)
+                    require(xml.nextTag() == org.xmlpull.v1.XmlPullParser.START_TAG && xml.name == "tv")
+                    fun requested(value: String): Boolean =
+                        normalizedGuideName(value) in wanted ||
+                            normalizedGuideName(value.trim().replace(qualitySuffix, "")) in wanted
+                    val wantedIds = HashSet<String>()
+                    var wantedProgramme = false
                     var id = ""
                     var channel = ""
                     var title = ""
@@ -2237,19 +2356,27 @@ class MainActivity : Activity() {
                                 } else Unit
                                 "programme" -> {
                                     channel = xml.getAttributeValue(null, "channel").orEmpty()
-                                    start = time(xml.getAttributeValue(null, "start"))
-                                    stop = time(xml.getAttributeValue(null, "stop"))
+                                    wantedProgramme = channel in wantedIds || requested(channel)
+                                    start = if (wantedProgramme) time(xml.getAttributeValue(null, "start")) else 0L
+                                    stop = if (wantedProgramme) time(xml.getAttributeValue(null, "stop")) else 0L
                                     title = ""
                                     description = ""
                                 }
-                                "title" -> title = xml.nextText().trim()
-                                "desc" -> description = xml.nextText().trim()
+                                "title" -> if (wantedProgramme) { title = xml.nextText().trim().take(240) } else Unit
+                                "desc" -> if (wantedProgramme) { description = xml.nextText().trim().take(500) } else Unit
                                 else -> Unit
                             }
                             org.xmlpull.v1.XmlPullParser.END_TAG -> when (xml.name) {
-                                "channel" -> id = ""
+                                "channel" -> {
+                                    if (requested(id) || names[id].orEmpty().any(::requested)) wantedIds.add(id)
+                                    else {
+                                        names.remove(id)
+                                        icons.remove(id)
+                                    }
+                                    id = ""
+                                }
                                 "programme" -> if (channel.isNotBlank() && title.isNotBlank() && start > 0L &&
-                                    stop > start && stop > now - 14L * 86400000 && start < now + 7L * 86400000) {
+                                    stop > start && stop > now - 7L * 86400000 && start < now + 3L * 86400000) {
                                     val programmes = schedule.getOrPut(channel) { mutableListOf() }
                                     if (programmes.size < 1200) programmes.add(Programme(channel, start, stop, title, description))
                                 } else Unit
