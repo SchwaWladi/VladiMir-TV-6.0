@@ -69,7 +69,8 @@ class MainActivity : Activity() {
     private val vodItems = mutableListOf<Entry>()
     private var currentEntry: Entry? = null
     private var catalogGroup: String? = null
-    private var epgLoadGeneration = 0
+    @Volatile private var epgLoadGeneration = 0
+    private val epgCacheLock = Any()
     data class Programme(val channel: String, val start: Long, val stop: Long, val title: String, val description: String)
     private val epgSchedule = mutableMapOf<String, MutableList<Programme>>()
     private var epgAliases = emptyMap<String, String>()
@@ -350,7 +351,7 @@ class MainActivity : Activity() {
         }
 
         header.addView(
-            label("VladiMir TV 6.0.3", 26f, true),
+            label("VladiMir TV 6.0.4", 26f, true),
             LinearLayout.LayoutParams(0, -2, 1f)
         )
 
@@ -1564,7 +1565,10 @@ class MainActivity : Activity() {
                         .replace("{start}", start.toString())
                         .replace("{end}", stop.toString())
                         .replace("{duration}", (stop - start).toString())
-                    val address = if (template.startsWith("@append:")) entry.url + resolved else URL(URL(entry.url), resolved).toString()
+                    val address = if (template.startsWith("@append:")) {
+                        if ('?' in entry.url && resolved.startsWith("?")) entry.url + "&" + resolved.drop(1)
+                        else entry.url + resolved
+                    } else URL(URL(entry.url), resolved).toString()
                     address.takeIf {
                         !it.contains('{') && (it.startsWith("https://") || it.startsWith("http://"))
                     }
@@ -2232,6 +2236,88 @@ class MainActivity : Activity() {
         clockHandler.postDelayed(dailyEpgRefresh, (epgRefreshIntervalMs - sinceRequest).coerceAtLeast(1L))
     }
 
+    private data class CachedGuide(
+        val programmes: Map<String, MutableList<Programme>>,
+        val aliases: Map<String, String>,
+        val icons: Map<String, String>
+    )
+
+    private fun guideCacheFile() = android.util.AtomicFile(java.io.File(filesDir, "xmltv-cache-v1"))
+
+    private fun readGuideCache(key: String, now: Long): CachedGuide? = synchronized(epgCacheLock) {
+        runCatching {
+            java.io.DataInputStream(guideCacheFile().openRead().buffered()).use { input ->
+                if (input.readUTF() != key) return@use null
+                val savedAt = input.readLong()
+                if (savedAt > now || now - savedAt > 3L * 86400000L) return@use null
+                fun count(max: Int) = input.readInt().also { require(it in 0..max) }
+                fun strings(): Map<String, String> = buildMap {
+                    repeat(count(100_000)) { put(input.readUTF(), input.readUTF()) }
+                }
+                val aliases = strings()
+                val icons = strings()
+                val schedule = linkedMapOf<String, MutableList<Programme>>()
+                repeat(count(20_000)) {
+                    val id = input.readUTF()
+                    val entries = mutableListOf<Programme>()
+                    repeat(count(2_000)) {
+                        val start = input.readLong()
+                        val stop = input.readLong()
+                        val title = input.readUTF()
+                        val description = input.readUTF()
+                        if (stop > now - 7L * 86400000L) entries.add(Programme(id, start, stop, title, description))
+                    }
+                    if (entries.isNotEmpty()) schedule[id] = entries
+                }
+                CachedGuide(schedule, aliases, icons)
+            }
+        }.getOrNull()
+    }
+
+    private fun writeGuideCache(key: String, now: Long, guide: CachedGuide, generation: Int) {
+        synchronized(epgCacheLock) {
+            if (generation != epgLoadGeneration) return
+            val file = guideCacheFile()
+            val stream = file.startWrite()
+            try {
+                val output = java.io.DataOutputStream(stream.buffered())
+                output.writeUTF(key)
+                output.writeLong(now)
+                fun strings(values: Map<String, String>) {
+                    output.writeInt(values.size)
+                    values.forEach { (k, v) -> output.writeUTF(k); output.writeUTF(v) }
+                }
+                strings(guide.aliases)
+                strings(guide.icons)
+                output.writeInt(guide.programmes.size)
+                guide.programmes.forEach { (id, programmes) ->
+                    output.writeUTF(id)
+                    val entries = programmes.take(2_000)
+                    output.writeInt(entries.size)
+                    entries.forEach {
+                        output.writeLong(it.start)
+                        output.writeLong(it.stop)
+                        output.writeUTF(it.title)
+                        output.writeUTF(it.description)
+                    }
+                }
+                output.flush()
+                file.finishWrite(stream)
+            } catch (failure: Exception) {
+                file.failWrite(stream)
+                throw failure
+            }
+        }
+    }
+
+    private fun applyGuide(guide: CachedGuide) {
+        epgSchedule.clear()
+        epgSchedule.putAll(guide.programmes)
+        epgAliases = guide.aliases
+        epgIcons = guide.icons
+        if (current in setOf("tv", "favorites", "guide") && sidePanel == null) showCatalog(current, catalogGroup)
+    }
+
     private fun loadEpg() {
         val channels = items.filter { it.type == "tv" }
         if (channels.isEmpty()) {
@@ -2256,7 +2342,14 @@ class MainActivity : Activity() {
             "https://free-epg.de/api/epg/ru.xml.gz"
         )).filter { it.startsWith("http://") || it.startsWith("https://") }.distinct()
         val now = System.currentTimeMillis()
+        val cacheKey = java.security.MessageDigest.getInstance("SHA-256")
+            .digest((addresses.joinToString("\n") + "\n" + wanted.sorted().joinToString("\n"))
+                .toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) }
         thread {
+            val cached = readGuideCache(cacheKey, now)
+            if (cached != null && cached.programmes.isNotEmpty()) runOnUiThread {
+                if (generation == epgLoadGeneration && !isDestroyed) applyGuide(cached)
+            }
             val schedule = mutableMapOf<String, MutableList<Programme>>()
             val names = mutableMapOf<String, MutableSet<String>>()
             val icons = mutableMapOf<String, String>()
@@ -2276,23 +2369,25 @@ class MainActivity : Activity() {
                 val sorted = schedule.mapValues { (_, entries) ->
                     entries.distinctBy { it.start }.sortedBy { it.start }.toMutableList()
                 }
-                val iconSnapshot = icons.toMap()
+                val snapshot = CachedGuide(sorted, uniqueAliases, icons.toMap())
+                if (finished && sorted.isNotEmpty()) {
+                    runCatching { writeGuideCache(cacheKey, now, snapshot, generation) }
+                }
                 runOnUiThread {
                     if (generation != epgLoadGeneration || isDestroyed) return@runOnUiThread
-                    if (sorted.isNotEmpty() || iconSnapshot.isNotEmpty()) {
-                        epgSchedule.clear()
-                        epgSchedule.putAll(sorted)
-                        epgAliases = uniqueAliases
-                        epgIcons = iconSnapshot
-                        if (current in setOf("tv", "favorites", "guide") && sidePanel == null) showCatalog(current, catalogGroup)
+                    if (sorted.isNotEmpty() || (epgSchedule.isEmpty() && snapshot.icons.isNotEmpty())) {
+                        applyGuide(snapshot)
                     }
                     if (finished) {
+                        if (sorted.isEmpty()) toast(tr("Не удалось обновить телегид", "Programm konnte nicht aktualisiert werden",
+                            "Could not refresh TV guide"))
                         val matched = channels.count { guideEntries(it).isNotEmpty() }
                         toast(tr("Телегид", "TV-Programm", "TV guide") + ": $matched / ${channels.size}")
                     }
                 }
             }
             addresses.forEachIndexed { index, address ->
+                if (generation != epgLoadGeneration) return@thread
                 val feed = runCatching { readGuide(address, now, wanted) }.getOrNull()
                 if (feed != null) {
                     feed.programmes.forEach { (id, entries) -> schedule.getOrPut(id) { mutableListOf() }.addAll(entries) }

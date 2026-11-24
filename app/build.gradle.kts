@@ -11,8 +11,8 @@ android {
         applicationId = "com.vladimir.tv.v6"
         minSdk = 23
         targetSdk = 28
-        versionCode = 63
-        versionName = "6.0.3"
+        versionCode = 64
+        versionName = "6.0.4"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
